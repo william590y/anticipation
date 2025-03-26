@@ -10,6 +10,9 @@ from tqdm import tqdm
 from anticipation.config import *
 from anticipation.vocab import *
 
+from transformers import AutoModelForCausalLM
+
+
 class ScorePredictionDataset(Dataset):
     def __init__(self, filepath, window_size=1017):
         self.pairs = []
@@ -30,7 +33,7 @@ class ScorePredictionDataset(Dataset):
                 target = tokens[pos]
                 
                 # We only want to predict score tokens (< CONTROL_OFFSET)
-                if target >= CONTROL_OFFSET | target == SEPARATOR:
+                if target >= CONTROL_OFFSET or target == SEPARATOR:
                     continue
                 
                 # Ensure we're at the start of a triplet for position context
@@ -68,7 +71,6 @@ class ScorePredictionDataset(Dataset):
                     'history': history_copy,
                     'new_tokens': new_tokens,
                     'target': target,
-                    'position': triplet_pos  # 0=time, 1=duration, 2=note
                 })
     
     def __len__(self):
@@ -82,13 +84,11 @@ class ScorePredictionDataset(Dataset):
         return {
             'input_ids': torch.tensor(input_tokens, dtype=torch.long),
             'target': torch.tensor(pair['target'], dtype=torch.long),
-            'position': torch.tensor(pair['position'], dtype=torch.long)
         }
 
 def collate_fn(batch):
     input_ids = [item['input_ids'] for item in batch]
     targets = torch.stack([item['target'] for item in batch])
-    positions = torch.stack([item['position'] for item in batch])
     
     # Pad inputs to same length
     max_len = max(len(ids) for ids in input_ids)
@@ -103,7 +103,6 @@ def collate_fn(batch):
         'input_ids': input_ids_padded,
         'attention_mask': attention_mask,
         'targets': targets,
-        'positions': positions
     }
 
 def train(model, train_loader, val_loader, args):
@@ -222,7 +221,6 @@ def main():
     
     print(f"Dataset created with {train_size} training samples and {val_size} validation samples")
     
-    # Create data loaders
     train_loader = DataLoader(
         train_dataset, 
         batch_size=args.batch_size, 
@@ -237,11 +235,8 @@ def main():
         collate_fn=collate_fn
     )
     
-    # Create model (replace with your actual model initialization)
-    from transformers import AutoModelForCausalLM
-    model = AutoModelForCausalLM.from_pretrained("gpt2")  # Replace with your model
+    model = AutoModelForCausalLM.from_pretrained('stanford-crfm/music-medium-800k').cuda()  # Replace with your model
     
-    # Train model
     train(model, train_loader, val_loader, args)
 
 if __name__ == '__main__':
