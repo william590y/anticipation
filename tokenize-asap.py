@@ -89,7 +89,7 @@ def main():
     else:
         print('Using parallel processing')
         # Determine number of processes to use (limit to avoid memory issues)
-        num_processes = min(os.cpu_count() or 4, 8)  # Cap at 8 processes to avoid memory issues
+        num_processes = min(os.cpu_count() or 16, 16) 
         print(f'Using {num_processes} processes for parallelization')
         
         # Process files individually in parallel
