@@ -8,7 +8,7 @@ from tqdm import tqdm
 from anticipation.config import *
 from anticipation.tokenize import tokenize2, tokenize3
 
-def batch_process(datafiles, output_path, batch_size=10, skip_Nones=True):
+def batch_process(datafiles, output_path, batch_size=4, skip_Nones=True):
     """Process files in small batches to avoid memory issues"""
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     

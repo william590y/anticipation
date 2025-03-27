@@ -367,7 +367,7 @@ def tokenize3(datafiles, output, idx=0, debug=False, skip_Nones=True):
             # assert len(controls) == 0 # should have consumed all controls (because of padding)
 
             # separator is a special token with value 55025
-            tokens[0:0] = [SEPARATOR, SEPARATOR, SEPARATOR]
+            interleaved_tokens[0:0] = [SEPARATOR, SEPARATOR, SEPARATOR]
             concatenated_tokens.extend(interleaved_tokens)
 
             # write sequences of length EVENT_SIZE*M = 1023 to the output file,
