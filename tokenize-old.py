@@ -4,11 +4,12 @@ import pandas as pd
 import gc
 from glob import glob
 from tqdm import tqdm
+import multiprocessing as mp
 
 from anticipation.config import *
 from anticipation.tokenize import tokenize2, tokenize3
 
-def batch_process(datafiles, output_path, batch_size=4, skip_Nones=True):
+def batch_process(datafiles, output_path, batch_size=1, skip_Nones=True, timeout_seconds=300):
     """Process files in small batches to avoid memory issues"""
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     
@@ -29,15 +30,58 @@ def batch_process(datafiles, output_path, batch_size=4, skip_Nones=True):
         # Use temporary output file for this batch
         temp_output = f"{output_path}.temp_{batch_start}"
         
-        # Process this batch
-        result = tokenize3(
-            current_batch, 
-            output=temp_output,
-            skip_Nones=(batch_start > 0 or skip_Nones)  # Only first batch needs headers
-        )
+        # Create a Queue to get the result
+        result_queue = mp.Queue()
+        
+        # Define a function that will run tokenize3 and put the result in the queue
+        def target_func():
+            try:
+                result = tokenize3(
+                    current_batch, 
+                    output=temp_output,
+                    skip_Nones=(batch_start > 0 or skip_Nones)
+                )
+                result_queue.put(result)
+            except Exception as e:
+                result_queue.put(e)
+        
+        # Start the process
+        process = mp.Process(target=target_func)
+        process.start()
+        
+        # Wait for the process to complete or timeout
+        process.join(timeout_seconds)
+        
+        # Check if the process timed out
+        if process.is_alive():
+            print(f"\nBatch starting at {batch_start} timed out after {timeout_seconds} seconds. Terminating process and skipping batch.")
+            process.terminate()
+            process.join()  # Ensure process is properly terminated
+            
+            # Clean up temporary file if it exists
+            if os.path.exists(temp_output):
+                os.remove(temp_output)
+                
+            continue
+        
+        # Check if an exception was raised
+        if result_queue.empty():
+            print(f"\nError processing batch starting at {batch_start}: No result returned")
+            # Clean up temporary file if it exists
+            if os.path.exists(temp_output):
+                os.remove(temp_output)
+            continue
+        
+        result_or_exception = result_queue.get()
+        if isinstance(result_or_exception, Exception):
+            print(f"\nError processing batch starting at {batch_start}: {result_or_exception}")
+            # Clean up temporary file if it exists
+            if os.path.exists(temp_output):
+                os.remove(temp_output)
+            continue
         
         # Update totals
-        seq_count, rest_count, too_short, too_long, too_manyinstr, discarded_seqs, truncations = result
+        seq_count, rest_count, too_short, too_long, too_manyinstr, discarded_seqs, truncations = result_or_exception
         total_seq_count += seq_count
         total_rest_count += rest_count
         total_too_short += too_short
@@ -99,7 +143,7 @@ def main():
     print('Tokenizing data; will be written to output.txt')
     print(f"Processing {len(all_files)} files in batches")
 
-    result = batch_process(all_files, './data/output.txt', batch_size=5)
+    result = batch_process(all_files, './data/output.txt', batch_size=5, timeout_seconds=1800)  # 30 minutes default timeout
     
     seq_count, rest_count, too_short, too_long, too_manyinstr, discarded_seqs, truncations = result
     
