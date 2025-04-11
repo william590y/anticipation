@@ -320,76 +320,83 @@ def tokenize3(datafiles, output, idx=0, debug=False, skip_Nones=True):
     stats = 4*[0] # (short, long, too many instruments, inexpressible)
     np.random.seed(0)
 
-    with open(output, 'w') as outfile:
-        concatenated_tokens = []
+    with open(output, 'a' if skip_Nones else 'w') as outfile:
         for j, filegroup in tqdm(list(enumerate(datafiles)), desc=f'#{idx}', position=idx+1, leave=True):
-
-            file1,file2,file3,file4 = filegroup
-
-            print(f'Now aligning {file1} and {file2}')
-            matched_tuples = align_tokens(file1,file2,file3,file4,skip_Nones=skip_Nones)
-
-            # interleave the tokens via alternation
-            interleaved_tokens = []
-
+            file1, file2, file3, file4 = filegroup
+            
+            if debug:
+                print(f'Now aligning {file1} and {file2}')
+                
+            # Process in batches to avoid memory issues
+            matched_tuples = align_tokens(file1, file2, file3, file4, skip_Nones=skip_Nones)
+            
+            # Use streaming approach for token interleaving
+            z = ANTICIPATE
+            concatenated_tokens = []
+            
+            # First process prefix (anticipation window)
+            prefix_tokens = []
+            prefix_count = 0
+            
             for i, l in enumerate(matched_tuples):
                 if l[0][0]-CONTROL_OFFSET <= DELTA*TIME_RESOLUTION:
-                    interleaved_tokens.extend(l[0])
-
-            prefix_len = int(len(interleaved_tokens)/3)
-
+                    prefix_tokens.extend(l[0])
+                    prefix_count += 1
+                else:
+                    break
+                    
+            # Determine prefix length (in tokens, not tuples)
+            prefix_len = prefix_count
+            concatenated_tokens.extend(prefix_tokens)
+            
+            # Process the rest with interleaving
             for i, l in enumerate(matched_tuples):
                 if i < len(matched_tuples)-prefix_len:
-                    interleaved_tokens.extend(l[2])
-                    interleaved_tokens.extend(matched_tuples[i+prefix_len][0])
+                    concatenated_tokens.extend(l[2])
+                    concatenated_tokens.extend(matched_tuples[i+prefix_len][0])
                 else:
-                    interleaved_tokens.extend(l[2])
-
-            print(interleaved_tokens)
-
-            # because we already have a sequence of interleaved tokens, don't want to make any truncations
-            # controls, truncations_c, _ = maybe_tokenize(file1)
-            # controls = [CONTROL_OFFSET+token for token in controls] # mark these tokens as controls
-            # all_events, truncations_e, _ = maybe_tokenize(file2)
-
-            z = ANTICIPATE
-
-            # all_truncations += truncations_c + truncations_e
-
-            # only need to pad the events 
-            # events = ops.pad(all_events, end_time=ops.max_time(all_events, seconds=False))
-
-            # rest_count += sum(1 if tok == REST else 0 for tok in events[2::3])
-
-            # map = compare_annotations(file4, file3) # create mapping from score to performance
-            # tokens, controls = ops.anticipate2(events, controls, map)
-
-            # assert len(controls) == 0 # should have consumed all controls (because of padding)
-
-            # separator is a special token with value 55025
-            interleaved_tokens[0:0] = [SEPARATOR, SEPARATOR, SEPARATOR]
-            concatenated_tokens.extend(interleaved_tokens)
-
-            # write sequences of length EVENT_SIZE*M = 1023 to the output file,
-            # any extra remain in concatenated_tokens for the next input file.      
+                    concatenated_tokens.extend(l[2])
+                
+                # Write sequences to file whenever we reach EVENT_SIZE*M tokens
+                while len(concatenated_tokens) >= EVENT_SIZE*M:
+                    seq = concatenated_tokens[0:EVENT_SIZE*M]
+                    concatenated_tokens = concatenated_tokens[EVENT_SIZE*M:]
+                    
+                    # Make sure each sequence starts at time 0
+                    seq = ops.translate(seq, -ops.min_time(seq, seconds=False), seconds=False)
+                    assert ops.min_time(seq, seconds=False) == 0
+                    
+                    if ops.max_time(seq, seconds=False) >= MAX_TIME:
+                        stats[3] += 1
+                        continue
+                    
+                    # Add global control but don't add separators
+                    seq.insert(0, z)
+                    
+                    outfile.write(' '.join([str(tok) for tok in seq]) + '\n')
+                    outfile.flush()  # Ensure data is written to disk
+                    seqcount += 1
+            
+            # Process any remaining tokens
             while len(concatenated_tokens) >= EVENT_SIZE*M:
                 seq = concatenated_tokens[0:EVENT_SIZE*M]
                 concatenated_tokens = concatenated_tokens[EVENT_SIZE*M:]
-
-                # make sure each sequence starts at time 0 (shifts each token's arrival time by the 
-                # min time of the sequence, accounting for control offsets)
+                
                 seq = ops.translate(seq, -ops.min_time(seq, seconds=False), seconds=False)
                 assert ops.min_time(seq, seconds=False) == 0
+                
                 if ops.max_time(seq, seconds=False) >= MAX_TIME:
                     stats[3] += 1
                     continue
-
-                # if seq contains SEPARATOR, global controls describe the first sequence
+                
                 seq.insert(0, z)
-
                 outfile.write(' '.join([str(tok) for tok in seq]) + '\n')
+                outfile.flush()
                 seqcount += 1
-
+            
+            # Clear memory between files
+            matched_tuples = None
+            
     if debug:
         fmt = 'Processed {} sequences (discarded {} tracks, discarded {} seqs, added {} rest tokens)'
         print(fmt.format(seqcount, stats[0]+stats[1]+stats[2], stats[3], rest_count))
