@@ -314,10 +314,12 @@ def tokenize3(datafiles, output, idx=0, debug=False, skip_Nones=True):
     Note: This is the new tokenization process that alternates score and perf tokens and inserts 
           None,None,None tokens whenver a corresponding score token cannot be found.
     """
-    tokens = []
+    import gc  # Add garbage collection
+    import os  # For getting basename from file paths
+    
     all_truncations = 0
     seqcount = rest_count = 0
-    stats = 4*[0] # (short, long, too many instruments, inexpressible)
+    stats = 4*[0]  # (short, long, too many instruments, inexpressible)
     np.random.seed(0)
 
     with open(output, 'a' if skip_Nones else 'w') as outfile:
@@ -325,77 +327,110 @@ def tokenize3(datafiles, output, idx=0, debug=False, skip_Nones=True):
             file1, file2, file3, file4 = filegroup
             
             if debug:
-                print(f'Now aligning {file1} and {file2}')
+                print(f'Processing {j+1}/{len(datafiles)}: {os.path.basename(file1)}')
+            
+            try:
+                # Get alignment results but process them in a streaming fashion
+                matched_tuples = align_tokens(file1, file2, file3, file4, skip_Nones=skip_Nones)
                 
-            # Process in batches to avoid memory issues
-            matched_tuples = align_tokens(file1, file2, file3, file4, skip_Nones=skip_Nones)
-            
-            # Use streaming approach for token interleaving
-            z = ANTICIPATE
-            concatenated_tokens = []
-            
-            # First process prefix (anticipation window)
-            prefix_tokens = []
-            prefix_count = 0
-            
-            for i, l in enumerate(matched_tuples):
-                if l[0][0]-CONTROL_OFFSET <= DELTA*TIME_RESOLUTION:
-                    prefix_tokens.extend(l[0])
-                    prefix_count += 1
-                else:
-                    break
-                    
-            # Determine prefix length (in tokens, not tuples)
-            prefix_len = prefix_count
-            concatenated_tokens.extend(prefix_tokens)
-            
-            # Process the rest with interleaving
-            for i, l in enumerate(matched_tuples):
-                if i < len(matched_tuples)-prefix_len:
-                    concatenated_tokens.extend(l[2])
-                    concatenated_tokens.extend(matched_tuples[i+prefix_len][0])
-                else:
-                    concatenated_tokens.extend(l[2])
-                
-                # Write sequences to file whenever we reach EVENT_SIZE*M tokens
-                while len(concatenated_tokens) >= EVENT_SIZE*M:
-                    seq = concatenated_tokens[0:EVENT_SIZE*M]
-                    concatenated_tokens = concatenated_tokens[EVENT_SIZE*M:]
-                    
-                    # Make sure each sequence starts at time 0
-                    seq = ops.translate(seq, -ops.min_time(seq, seconds=False), seconds=False)
-                    assert ops.min_time(seq, seconds=False) == 0
-                    
-                    if ops.max_time(seq, seconds=False) >= MAX_TIME:
-                        stats[3] += 1
-                        continue
-                    
-                    # Add global control but don't add separators
-                    seq.insert(0, z)
-                    
-                    outfile.write(' '.join([str(tok) for tok in seq]) + '\n')
-                    outfile.flush()  # Ensure data is written to disk
-                    seqcount += 1
-            
-            # Process any remaining tokens
-            while len(concatenated_tokens) >= EVENT_SIZE*M:
-                seq = concatenated_tokens[0:EVENT_SIZE*M]
-                concatenated_tokens = concatenated_tokens[EVENT_SIZE*M:]
-                
-                seq = ops.translate(seq, -ops.min_time(seq, seconds=False), seconds=False)
-                assert ops.min_time(seq, seconds=False) == 0
-                
-                if ops.max_time(seq, seconds=False) >= MAX_TIME:
-                    stats[3] += 1
+                if not matched_tuples:
+                    if debug:
+                        print(f"No matches found for {os.path.basename(file1)}")
                     continue
                 
-                seq.insert(0, z)
-                outfile.write(' '.join([str(tok) for tok in seq]) + '\n')
-                outfile.flush()
-                seqcount += 1
-            
-            # Clear memory between files
-            matched_tuples = None
+                # Find prefix length (anticipation window)
+                prefix_len = 0
+                for i, l in enumerate(matched_tuples):
+                    if l[0][0]-CONTROL_OFFSET <= DELTA*TIME_RESOLUTION:
+                        prefix_len += 1
+                    else:
+                        break
+                
+                z = ANTICIPATE
+                
+                # Store only necessary tuples for interleaving
+                # Process tokens in smaller chunks to avoid excessive memory use
+                chunk_size = min(1000, len(matched_tuples))
+                
+                for chunk_start in range(0, len(matched_tuples), chunk_size):
+                    chunk_end = min(chunk_start + chunk_size, len(matched_tuples))
+                    chunk = matched_tuples[chunk_start:chunk_end]
+                    
+                    # Generate tokens for this chunk
+                    concatenated_tokens = []
+                    
+                    # Add prefix tokens if this is the first chunk
+                    if chunk_start == 0:
+                        for i in range(min(prefix_len, len(chunk))):
+                            concatenated_tokens.extend(chunk[i][0])
+                    
+                    # Process the chunk with interleaving
+                    for i, l in enumerate(chunk):
+                        local_idx = chunk_start + i
+                        
+                        # Add performance tokens
+                        concatenated_tokens.extend(l[2])
+                        
+                        # Add next anticipation token if available
+                        next_anticipation_idx = local_idx + prefix_len
+                        if next_anticipation_idx < len(matched_tuples):
+                            try:
+                                # Load just the control tokens we need
+                                next_control = matched_tuples[next_anticipation_idx][0]
+                                concatenated_tokens.extend(next_control)
+                            except IndexError:
+                                # In case we hit the end of the available tuples
+                                pass
+                        
+                        # Write sequences whenever we reach EVENT_SIZE*M tokens
+                        while len(concatenated_tokens) >= EVENT_SIZE*M:
+                            seq = concatenated_tokens[0:EVENT_SIZE*M]
+                            concatenated_tokens = concatenated_tokens[EVENT_SIZE*M:]
+                            
+                            # Normalize time to start at 0
+                            seq = ops.translate(seq, -ops.min_time(seq, seconds=False), seconds=False)
+                            assert ops.min_time(seq, seconds=False) == 0
+                            
+                            if ops.max_time(seq, seconds=False) >= MAX_TIME:
+                                stats[3] += 1
+                                continue
+                            
+                            # Add global control token (no separators)
+                            seq.insert(0, z)
+                            
+                            outfile.write(' '.join([str(tok) for tok in seq]) + '\n')
+                            outfile.flush()
+                            seqcount += 1
+                    
+                    # Process any remaining tokens from this chunk
+                    if concatenated_tokens:
+                        while len(concatenated_tokens) >= EVENT_SIZE*M:
+                            seq = concatenated_tokens[0:EVENT_SIZE*M]
+                            concatenated_tokens = concatenated_tokens[EVENT_SIZE*M:]
+                            
+                            seq = ops.translate(seq, -ops.min_time(seq, seconds=False), seconds=False)
+                            assert ops.min_time(seq, seconds=False) == 0
+                            
+                            if ops.max_time(seq, seconds=False) >= MAX_TIME:
+                                stats[3] += 1
+                                continue
+                            
+                            seq.insert(0, z)
+                            outfile.write(' '.join([str(tok) for tok in seq]) + '\n')
+                            outfile.flush()
+                            seqcount += 1
+                    
+                    # Free memory after each chunk
+                    chunk = None
+                    
+                # Free memory after processing the file
+                matched_tuples = None
+                gc.collect()
+                
+            except Exception as e:
+                if debug:
+                    print(f"Error processing {os.path.basename(file1)}: {str(e)}")
+                continue
             
     if debug:
         fmt = 'Processed {} sequences (discarded {} tracks, discarded {} seqs, added {} rest tokens)'
